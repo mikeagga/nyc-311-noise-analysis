@@ -1,0 +1,931 @@
+---
+title: "NYC 311 Noise Complaint Closure Time Analysis"
+author: "Michael Agostino"
+toc: true
+highlight-style: pygments
+number-sections: true	
+engine: jupyter
+format: 
+  html: 
+    html-math-method: katex
+    embed-resources: true
+    self-contained-math: true	
+  pdf: 
+    geometry: 
+      - top=30mm
+      - left=20mm
+---
+
+## Data cleaning
+
+Start by fixing the headers, I make them lowercase and use underscores instead
+of spaces.
+```{python}
+import pandas as pd
+
+df = pd.read_csv('data/nypd311w062925noise_by100625.csv')
+
+df.columns = df.columns.str.replace(" ", "_").str.lower()
+
+df.head()
+```
+
+In order to get a good view on what data we are missing, I print out the
+missing percentage and column name.
+
+With this info we can develop an understanding of how the data should be
+cleaned. I immediately remove all of the totally empty columns.
+
+We can also infer that if two columns have the same missing percentage, they
+may be missing the same data.
+
+```{python}
+missing_percentage = (df.isnull().sum() / len(df)) * 100
+print("Percentage of missing values per column:")
+print(missing_percentage)
+
+# remove columns that are completely empty
+df.dropna(axis=1, how='all', inplace=True)
+```
+
+Since `park_borough` and `borough` have the same information, keeping both is
+redundant.
+
+I like borough better as a name so I remove `park_borough`.
+
+```{python}
+# check if all boroughs are unique 
+comparison = df['borough'] == df['park_borough']
+
+# .all() checks if all values in the boolean series are true
+are_identical = comparison.all()
+print(are_identical)
+
+df.drop('park_borough', axis=1, inplace=True)
+```
+
+Here I find that there are some rows contain 'Unspecified' in borough column.
+
+I replace them with NaN for easier comparison later.
+
+```{python}
+import numpy as np
+
+# Get the unique items in "borough"
+unique_borough = df['borough'].unique()
+print(unique_borough)
+
+# Replace the Unspecified items with Na
+df['borough'] = df['borough'].replace('Unspecified', np.nan)
+```
+
+Status only contains "closed" so drop it.
+
+Agency only contains "NYPD" so drop it.
+
+Unique key is not useful to us, so drop it.
+
+```{python}
+# .nunique() counts the number of unique values in the Series
+status_is_constant = df['status'].nunique() == 1
+print(status_is_constant)
+
+df.drop('status', axis=1, inplace=True)
+
+# We drop duplicates from the two columns to see how many unique pairs exist
+df.drop('agency', axis=1, inplace=True)
+
+# 'unique_key' is an identifier, not a feature for analysis, so we drop it.
+df.drop('unique_key', axis=1, inplace=True)
+```
+
+Only different rows are NaN. So we could remove one column.
+
+```{python}
+different_rows_mask = df['cross_street_1'] != df['intersection_street_1']
+different_rows = df.loc[different_rows_mask, ['cross_street_1', 'intersection_street_1']]
+
+print(different_rows.head())
+
+# drop this since its the same as intersection street 2
+df.drop(columns='cross_street_1', inplace=True)
+```
+
+Same thing here, removed cross_street_2 for consistency. 
+
+```{python}
+different_rows_mask = df['cross_street_2'] != df['intersection_street_2']
+different_rows = df.loc[different_rows_mask, ['cross_street_2', 'intersection_street_2']]
+
+print(different_rows.head())
+
+# drop this since its the same as intersection street 2
+df.drop('cross_street_2', axis=1, inplace=True)
+```
+
+Here I check if each zipcode is in a list of valid zipcodes.
+
+```{python}
+# A set of all valid NYC zip codes
+valid_zip = {
+    10463, 10471, 10466, 10469, 10470, 10475, 10458, 10467, 10468,
+    10461, 10462, 10464, 10465, 10472, 10473, 10453, 10457, 10460,
+    10451, 10452, 10456, 10454, 10455, 10459, 10474, 11211, 11222,
+    11201, 11205, 11215, 11217, 11231, 11213, 11212, 11216, 11233,
+    11238, 11207, 11208, 11220, 11232, 11204, 11218, 11219, 11230,
+    11203, 11210, 11225, 11226, 11234, 11236, 11239, 11209, 11214,
+    11228, 11223, 11224, 11229, 11235, 11206, 11221, 11237, 10031,
+    10032, 10033, 10034, 10040, 10026, 10027, 10030, 10037, 10039,
+    10029, 10035, 10023, 10024, 10025, 10021, 10028, 10044, 10128,
+    10001, 10011, 10018, 10019, 10020, 10036, 10010, 10016, 10017,
+    10022, 10012, 10013, 10014, 10002, 10003, 10009, 10004, 10005,
+    10006, 10007, 10038, 10280, 11101, 11102, 11103, 11104, 11105,
+    11106, 11368, 11369, 11370, 11372, 11373, 11377, 11378, 11354,
+    11355, 11356, 11357, 11358, 11359, 11360, 11361, 11362, 11363,
+    11364, 11374, 11375, 11379, 11385, 11365, 11366, 11367, 11414,
+    11415, 11416, 11417, 11418, 11419, 11420, 11421, 11412, 11423,
+    11432, 11433, 11434, 11435, 11436, 11004, 11005, 11411, 11413,
+    11422, 11426, 11427, 11428, 11429, 11691, 11692, 11693, 11694,
+    11695, 11697, 10302, 10303, 10310, 10301, 10304, 10305, 10314,
+    10306, 10307, 10308, 10309, 10312
+}
+
+# convert incident_zip to integer first (to remove .0), then to string
+# this converts 10001.0 -> 10001 -> '10001'
+df['incident_zip'] = pd.to_numeric(df['incident_zip'], errors='coerce').astype('Int64').astype(str)
+
+valid_zip_strings = {str(z) for z in valid_zip}
+
+# Identify invalid zip codes (not in valid set AND not '<NA>')
+is_invalid_zip = ~df['incident_zip'].isin(valid_zip_strings) & (df['incident_zip'] != '<NA>')
+
+# Set invalid zip codes to NaN
+df.loc[is_invalid_zip, 'incident_zip'] = np.nan
+
+print(f"Valid zip codes remaining: {df['incident_zip'].notna().sum()}")
+print(f"Invalid zip codes set to NaN: {is_invalid_zip.sum()}")
+print("\nSample valid zip codes:")
+print(df['incident_zip'].dropna().head(20))
+```
+
+Complaint type has the prefix 'Noise -' before every entry, so I just remove
+them to save space.
+
+```{python}
+df['complaint_type'] = df['complaint_type'].str.replace('Noise - ', '', regex=False)
+```
+
+### Check For date inconsistencies
+
+Here I format the date columns for comparison.
+
+```{python}
+# Convert date columns to datetime objects for analysis
+df['created_date'] = pd.to_datetime(df['created_date'], format='%m/%d/%Y %I:%M:%S %p', errors='coerce')
+df['closed_date'] = pd.to_datetime(df['closed_date'], format='%m/%d/%Y %I:%M:%S %p', errors='coerce')
+df['resolution_action_updated_date'] = pd.to_datetime(df['resolution_action_updated_date'], format='%m/%d/%Y %I:%M:%S %p', errors='coerce')
+```
+
+Check for complaints where 'closed_date' is before 'created_date'
+
+```{python}
+error1_mask = (df['closed_date'].notna()) & (df['closed_date'] < df['created_date'])
+error1_count = len(df[error1_mask])
+
+print(error1_count)
+```
+
+Check for complaints where 'closed_date' and 'created_date' are identical
+
+```{python}
+error2_mask = (df['created_date'].notna()) & (df['closed_date'].notna()) & (df['created_date'] == df['closed_date'])
+error2_count = len(df[error2_mask])
+
+print(error2_count)
+```
+
+Check if any complaints were created or closed at exactly 12, this would mean
+that there is an auto close feature in the system.
+
+```{python}
+is_midnight = (df['created_date'].dt.hour == 0) & (df['created_date'].dt.minute == 0) & (df['created_date'].dt.second == 0)
+is_noon = (df['created_date'].dt.hour == 12) & (df['created_date'].dt.minute == 0) & (df['created_date'].dt.second == 0)
+error3_mask = (df['created_date'].notna()) & (is_midnight | is_noon)
+error3_count = len(df[error3_mask])
+
+print(error3_count)
+```
+Seems like there are no errors in this data from our outputs.
+
+Look at the fully cleaned dataset, I fill in some missing coordinates from the
+address column later in this paper.
+
+```{python}
+df.head()
+```
+
+Finally save as a feather format, which is much more efficient.
+
+```{python}
+output_path = 'data/nypd311w062925noise_by100625_cleaned.arrow'
+
+# Save the cleaned DataFrame to Arrow format
+df.to_feather(output_path)
+```
+
+### Notes to Data curator
+- Specify directly in a column if there is no location data, the data was given
+	by the report, or it was derived from the call.
+
+- Maybe specify which department responded to which report.
+
+## Data Exploration
+
+Here I'm creating columns in order to do analysis.
+
+We can create the response time column because we know there are no errors. We
+can also separate into day or night, there may be an interesting correlation
+there. Also weekend vs weekday may show something about the data.
+
+```{python}
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+
+df = pd.read_feather('data/nypd311w062925noise_by100625_cleaned.arrow')
+
+# Create response_time column
+df['response_time'] = (df['closed_date'] - df['created_date']).dt.total_seconds() / 3600
+
+# Create time_of_day column
+df['time_of_day'] = df['created_date'].dt.hour.apply(
+    lambda hour: 'Daytime' if 6 <= hour < 20 else 'Nighttime'
+)
+
+# Create day_type column
+df['day_type'] = df['created_date'].dt.dayofweek.apply(
+    lambda day: 'Weekday' if day < 5 else 'Weekend'
+)
+```
+
+### Time of Day vs Response time
+
+Display descriptive statistics, and create a plot to visualize time vs response
+time.
+
+```{python}
+time_stats = df.groupby('time_of_day')['response_time'].describe()
+time_stats.head()
+```
+
+```{python}
+df['hour_of_day'] = df['created_date'].dt.hour
+df['hour_of_day'] = pd.Categorical(df['hour_of_day'], categories=list(range(24)), ordered=True)
+
+#  Hourly Pattern
+plt.figure(figsize=(14, 8))
+hourly_avg = df.groupby('hour_of_day')['response_time'].mean()
+plt.plot(hourly_avg.index, hourly_avg.values, marker='o')
+plt.axvspan(0, 6, alpha=0.2, color='blue', label='Nighttime')
+plt.axvspan(20, 24, alpha=0.2, color='blue')
+plt.axvspan(6, 20, alpha=0.2, color='yellow', label='Daytime')
+plt.title('Average Response Time by Hour of Day')
+plt.xlabel('Hour of Day')
+plt.ylabel('Average Response Time (Hours)')
+plt.xticks(range(24))
+plt.legend()
+plt.grid(True)
+plt.show()
+```
+From this visualization we can see that there seems to be a difference between
+response time during day and night, in order to confirm this we could perform
+a hypothesis test.
+
+
+H0: Response times do not differ between day and night.
+
+HA: day time response time is different from night time response time.
+
+```{python}
+# Separate the data into two groups
+daytime_response = df[df['time_of_day'] == 'Daytime']['response_time']
+nighttime_response = df[df['time_of_day'] == 'Nighttime']['response_time']
+
+# Perform a t-test
+t_stat, p_value = stats.ttest_ind(nighttime_response, daytime_response, equal_var=False)
+
+print("\nStatistical Test Results:")
+print(f"T-statistic: {t_stat:.4f}")
+print(f"P-value: {p_value:.4f}")
+```
+According to this our p-value is much smaller than 0.05, we reject H0, and there
+is significant statistical evidence that response time differs between day and
+night time.
+
+### Complaint type (descriptor) Day and Night vs. response time. 
+
+
+```{python}
+complaint_time_data = df.groupby(['descriptor', 'time_of_day'])['response_time'].mean().unstack()
+
+# Create the grouped bar chart
+plt.figure(figsize=(14, 8))
+complaint_time_data.plot(kind='bar', figsize=(14, 8), width=0.8)
+
+# Customize the plot
+plt.title('Average Response Time by Complaint Type and Time of Day', fontsize=16)
+plt.ylabel('Average Response Time (Hours)', fontsize=12)
+plt.xlabel('Complaint Type', fontsize=12)
+plt.xticks(rotation=45, ha='right')
+plt.legend(title='Time of Day')
+plt.tight_layout()
+plt.show()
+```
+From this visualization we can see that there seems to be a difference between
+complaint descriptor response time on average. In order to test this we can set
+up an ANOVA test to compare each complaint type to response time.
+
+H0: All descriptor mean response times are equal.
+
+HA: At least one differs.
+
+
+```{python}
+complaint_groups = [group['response_time'].values for name, group in df.groupby('descriptor')]
+
+f_statistic, p_value = stats.f_oneway(*complaint_groups)
+
+print(f"F-statistic: {f_statistic:.4f}")
+print(f"P-value: {p_value:.4f}")
+```
+We reject H0, the p-value is much smaller than 0.05. 
+
+It is evident that there is a statistically significant difference in mean
+response time per descriptor.
+
+### Response Time Vs Borough (day and night).
+
+```{python}
+borough_time_data = df.groupby(['borough', 'time_of_day'])['response_time'].mean().unstack()
+
+plt.figure(figsize=(14, 8))
+borough_time_data.plot(kind='bar', figsize=(14, 8), width=0.8)
+
+plt.title('Average Response Time by Borough Type and Time of Day', fontsize=16)
+plt.ylabel('Average Response Time (Hours)', fontsize=12)
+plt.xlabel('Borough', fontsize=12)
+plt.xticks(rotation=45, ha='right')
+plt.legend(title='Time of Day')
+plt.tight_layout()
+plt.show()
+```
+
+This chart shows that there is definitely some variance between boroughs and
+response times.
+
+It seems the slowest is Bronx during the day.
+
+We can test our hypothesis that there is a difference between mean response time
+per borough. We can use a one way ANOVA test.
+
+H0: Mean response time per borough does not differ.
+
+HA: At least one borough differs in mean response time.
+
+```{python}
+borough_groups = [group['response_time'].values for name, group in df.groupby('borough')]
+
+# --- Step 3: Perform the One-Way ANOVA Test ---
+f_statistic, p_value = stats.f_oneway(*borough_groups)
+
+print(f"F-statistic: {f_statistic:.4f}")
+print(f"P-value: {p_value:.4f}")
+```
+
+Since our p-value is much smaller than 0.05, we can reject H0. There is
+significant statistical evidence to conclude that there is a difference between
+mean response time per borough.
+
+### Mean response time vs type of day (weekday or weekend)
+
+```{python}
+df['day_type'] = df['created_date'].dt.dayofweek.apply(
+    lambda day: 'Weekday' if day < 5 else 'Weekend'
+)
+
+day_time_data = df.groupby(['day_type', 'time_of_day'])['response_time'].mean().unstack()
+
+# 2. Create the grouped bar chart
+plt.figure(figsize=(10, 7))
+day_time_data.plot(kind='bar', figsize=(10, 7), width=0.8)
+
+# 3. Customize the plot
+plt.title('Average Response Time by Day Type and Time of Day', fontsize=16)
+plt.ylabel('Average Response Time (Hours)', fontsize=12)
+plt.xlabel('Day Type', fontsize=12)
+plt.xticks(rotation=0) # Keep the x-axis labels horizontal for clarity
+plt.legend(title='Time of Day')
+plt.tight_layout()
+plt.show()
+```
+From this chart we can see that there does not seem to be a large difference
+between response times on weekends and weekdays. We can use a T-test to test
+our hypothesis.
+
+H0: There is no difference between mean response times between day types.
+
+HA: Mean response time differs between day type.
+
+```{python}
+day_groups = [group['response_time'].values for name, group in df.groupby('day_type')]
+
+f_statistic, p_value = stats.f_oneway(*day_groups)
+
+print(f"F-statistic: {f_statistic:.4f}")
+print(f"P-value: {p_value:.4f}")
+```
+There is insufficient evidence to conclude there is a difference in response
+times on weekends compared to weekdays.
+
+### Testing Correlations
+In this subsection we test to see if there is a correlation between some
+variables and a new variable `over2h`, which is declared below.
+
+```{python}
+df['over2h'] = df['response_time'] >= 2
+```
+Since this is a binary variable, we can test correlation using chi squared tests.
+
+#### Time of day vs Over 2 Hrs.
+
+```{python}
+contingency_table = pd.crosstab(df['time_of_day'], df['over2h'])
+chi2, p_value, _, _ = stats.chi2_contingency(contingency_table)
+
+print(contingency_table)
+
+print(f"Chi-square statistic: {chi2:.4f}")
+print(f"P-value: {p_value:.4f}")
+```
+Since our p-value is much smaller than 0.05. There is statistically significant
+evidence to show that over 2 hrs depends on time of day.
+
+#### Day Type vs Over 2 Hrs.
+
+```{python}
+df['is_weekend'] = df['created_date'].dt.dayofweek >= 5
+
+contingency_table = pd.crosstab(df['is_weekend'], df['over2h'])
+
+print(contingency_table)
+```
+
+```{python}
+chi2, p_value, dof, expected = stats.chi2_contingency(contingency_table)
+print(f"Chi-square statistic: {chi2:.4f}")
+print(f"P-value: {p_value:.4f}")
+print(f"Degrees of freedom: {dof}")
+```
+
+The result is statistically significant. There is a strong association between
+whether a complaint is made on a weekend and whether it takes over 2 hours to
+resolve.
+
+```{python}
+contingency_table = pd.crosstab(df['descriptor'], df['over2h'])
+
+print("Contingency Table (Complaint Type vs. Over 2 Hours):")
+print(contingency_table)
+
+chi2, p_value, dof, expected = stats.chi2_contingency(contingency_table)
+
+print("Chi-Square Test Results for Complaint Type vs. Over 2 Hours:")
+print(f"Chi-square statistic: {chi2:.4f}")
+print(f"P-value: {p_value:.4f}")
+print(f"Degrees of freedom: {dof}")
+```
+There is a statistically significant association between complaint type and
+whether a request takes over 2 hours.
+
+```{python}
+contingency_table = pd.crosstab(df['borough'], df['over2h'])
+
+print("Contingency Table (Borough vs. Over 2 Hours):")
+print(contingency_table)
+
+chi2, p_value, dof, expected = stats.chi2_contingency(contingency_table)
+
+print(f"Chi-square statistic: {chi2:.4f}")
+print(f"P-value: {p_value:.4f}")
+print(f"Degrees of freedom: {dof}")
+```
+There is a statistically significant association between borough and whether a
+request takes over 2 hours.
+
+## Data Analysis.
+
+From my testing with geopy I realized that many of the addresses are
+non-standard, for example:
+
+* `19 1/2 Pitt Street`
+	* This has 1/2 in its name, which geopy will fail to recognize.
+* `86th St & Transverse Road`
+	* This is an intersection which may fail.
+* `2271-89 8th Avenue`
+	* This is a range of buildings which will fail.
+
+There were many errors like this, which lead to a lot of missing data which
+would cause my analysis of distances to be inconsistent. Fixing all of these
+seemingly uncorrelated errors would be tedious, so I changed my approach.
+
+I decided to use OpenCage, which is a geocoder api that is significantly more
+powerful than geopy. In order to use OpenCage I needed an api key, although it
+was very simple to get one.
+
+In spirit of reproducibility these are the steps:
+
+1. Visit the [OpenCage sign up page](https://opencagedata.com/users/sign_up)
+2. Sign up using your email, and answer a few questions.
+3. Then you will be taken to a dashboard where you will be presented with an API key.
+
+In order to compile this project just place your api key into the
+`OPENCAGE_API_KEY` variable in the code below:
+
+The full line in the code below is: `OPENCAGE_API_KEY = 'YOUR API KEY HERE'`.
+
+OpenCage can catch most of the errors that geopy could not. There was only
+a problem with one address, the 103rd precinct with address: `168-02 P.O
+Edward Byrne Ave.` in the `nypd_precincts.csv`, only one address error is much
+more manageable.
+
+In order to fix this error I simply found the address of the 103rd precinct using
+Google: `168-02 91st Ave, Jamaica, NY 11432`, then replaced it within our data,
+and used OpenCage like normal.
+
+I also rounded the coordinates to the 5th decimal place in order to match the
+noise complaint data.
+
+```{.python}
+from opencage.geocoder import OpenCageGeocode
+import time
+
+# Set up OpenCage API key (only needs to be set once)
+OPENCAGE_API_KEY = 'YOUR API KEY HERE'
+geocoder = OpenCageGeocode(OPENCAGE_API_KEY)
+
+# Load and clean data
+precinct_df = pd.read_csv('data/nypd_precincts.csv', encoding='latin-1')
+clean_precinct_df = precinct_df.dropna(subset=['Address']).copy()
+
+clean_precinct_df.loc[clean_precinct_df['Precinct'].str.contains('103', na=False), 'Address'] = '168-02 91st Ave, Jamaica, NY 11432'
+
+# Geocode
+lats, lngs = [], []
+for address in clean_precinct_df['Address']:
+    try:
+        result = geocoder.geocode(address)
+        if result and len(result):
+            print(address)
+            lats.append(result[0]['geometry']['lat'])
+            lngs.append(result[0]['geometry']['lng'])
+        else:
+            print(f"FAILED: {address}")
+            lats.append(None)
+            lngs.append(None)
+    except Exception as e:
+        print(f"ERROR on {address}: {e}")
+        lats.append(None)
+        lngs.append(None)
+
+# Add to DataFrame and save
+clean_precinct_df['latitude'] = lats
+clean_precinct_df['longitude'] = lngs
+
+clean_precinct_df = clean_precinct_df.round({'latitude': 5, 'longitude': 5})
+
+clean_precinct_df.to_csv('data/nypd_precincts_geocoded.csv', index=False)
+
+print("Done")
+```
+
+I then load this geocoded precinct data into a variable called `df_p`.
+
+```{python}
+df_p = pd.read_csv('data/nypd_precincts_geocoded.csv')
+df_p.head()
+```
+
+There are many rows that are missing coordinate data in the noise complaint
+data set. Many of these rows still contain address information, so we can use
+OpenCage to get their coordinates. Although there are still some rows that do
+not contain even borough data or address data, we learned this from a previous
+cleaning step. I ignore these rows, then round and save to a new feather file.
+
+```{.python}
+missing_coords_mask = df['latitude'].isna() & df['longitude'].isna() & df['borough'].notna()
+
+# Create a new DataFrame containing only the rows that meet all conditions
+df_to_geocode = df[missing_coords_mask].copy()
+
+# If there are no matching rows, we can stop
+if len(df_to_geocode) == 0:
+    print("No rows to geocode.")
+else:
+    # Use the geocoder already initialized above
+    lats = []
+    lngs = []
+
+    # Iterate over the DataFrame that needs geocoding
+    for index, row in df_to_geocode.iterrows():
+        address = row['incident_address']
+        borough = row['borough'] # We know this is not NaN because of our mask
+        
+        # Create a full, well-formatted address string
+        full_address = f"{address}, {borough}, NY, USA"
+        
+        print(f"{full_address}")
+        
+        try:
+            result = geocoder.geocode(full_address)
+            if result and len(result):
+                lats.append(result[0]['geometry']['lat'])
+                lngs.append(result[0]['geometry']['lng'])
+            else:
+                print(f"FAILED {full_address}")
+                lats.append(None)
+                lngs.append(None)
+                
+        except Exception as e:
+            print(f"ERROR{full_address}: {e}")
+            lats.append(None)
+            lngs.append(None)
+        
+        # be respectful to the api!
+        time.sleep(1)
+
+    df_to_geocode['latitude'] = lats
+    df_to_geocode['longitude'] = lngs
+
+    # Use the index to update the original DataFrame 'df' in place
+    df.update(df_to_geocode)
+
+df[['latitude', 'longitude']] = df[['latitude', 'longitude']].round(5)
+df.to_feather('data/nypd311w06225noise_by100625_cleaned.arrow')
+```
+
+### Getting the distance to closest precinct.
+
+First we read our dataframe that has fixed coordinate data.
+
+```{python}
+df = pd.read_feather('data/nypd311w062925noise_by100625_cleaned.arrow')
+```
+
+We can use cKDTree to find the nearest precinct using our geocoded precinct
+data.
+
+cKDTree is basically a very fast, nearest distance algorithm.
+
+Since our data is so large, and NYC is not a very large area I thought it would
+be ok to approximate the coordinates by simply converting latitude and
+longitude data to km by multiplying by a constant in order to save computation time.
+
+```{python}
+from scipy.spatial import cKDTree
+import numpy as np
+
+# Filter out rows with missing coordinates from BOTH dataframes
+df_with_coords = df.dropna(subset=['latitude', 'longitude']).copy()
+df_p_clean = df_p.dropna(subset=['latitude', 'longitude']).copy()
+
+# Get coordinates
+precinct_coords = df_p_clean[['latitude', 'longitude']].values
+complaint_coords = df_with_coords[['latitude', 'longitude']].values
+
+# At NYC's latitude (~40.7°), 1° longitude ≈ 85 km, 1° latitude ≈ 111 km
+lat_scale = 111.0  # km per degree latitude
+lon_scale = 85.0   # km per degree longitude (approximate for NYC)
+
+# Scale coordinates to kilometers
+precinct_coords_scaled = precinct_coords.copy()
+precinct_coords_scaled[:, 0] *= lat_scale
+precinct_coords_scaled[:, 1] *= lon_scale
+
+complaint_coords_scaled = complaint_coords.copy()
+complaint_coords_scaled[:, 0] *= lat_scale
+complaint_coords_scaled[:, 1] *= lon_scale
+```
+
+We can now build the tree, then query it to get our nearest precinct and its
+distance. We then apply this back to our noise complaint dataset.
+
+I also made sure to add back in the `over2h` variable in order to continue with
+further analysis.
+
+Finally saved that data into a new file.
+
+```{python}
+# Build KD-Tree
+tree = cKDTree(precinct_coords_scaled)
+
+# Query for nearest neighbor
+distances, indices = tree.query(complaint_coords_scaled)
+
+# Add to dataframe
+df_with_coords['dist2pp'] = distances
+df_with_coords['nearest_precinct'] = df_p_clean.iloc[indices]['Precinct'].values
+
+# Initialize the columns in the original dataframe
+df['dist2pp'] = np.nan
+df['nearest_precinct'] = None
+
+# Update using loc with the index from df_with_coords
+df.loc[df_with_coords.index, 'dist2pp'] = df_with_coords['dist2pp']
+df.loc[df_with_coords.index, 'nearest_precinct'] = df_with_coords['nearest_precinct']
+
+print(df['dist2pp'].describe())
+
+# Create response_time and over2h
+df['response_time'] = (df['closed_date'] - df['created_date']).dt.total_seconds() / 3600
+df['over2h'] = df['response_time'] >= 2
+
+df.to_feather('data/nypd311w062925noise_by100625_with_distances.arrow')
+
+df.head()
+```
+
+### Apply Census Data to the dataset.
+
+I decided to use median household income for my analysis, which was obtained
+from the US Census website.
+
+```{python}
+# Load census data
+census_df = pd.read_csv('data/ACSST5Y2023.S1901-Data.csv', header=0, skiprows=[1])
+
+# Extract just the 5-digit zip code from the NAME column
+census_df['incident_zip'] = census_df['NAME'].str.extract(r'(\d{5})')
+
+# Select zip code and median household income
+census_clean = census_df[['incident_zip', 'S1901_C01_012E']].copy()
+census_clean.columns = ['incident_zip', 'median_household_income']
+
+# Convert income to numeric
+census_clean['median_household_income'] = pd.to_numeric(
+    census_clean['median_household_income'], 
+    errors='coerce'
+)
+
+# Remove any rows where zip code is missing
+census_clean = census_clean.dropna(subset=['incident_zip'])
+
+print(census_clean['median_household_income'].describe())
+
+# Merge with your main dataframe (both are already strings)
+df = df.merge(census_clean, on='incident_zip', how='left')
+
+print(df['median_household_income'].describe())
+
+df.to_feather('data/nypd311w062925noise_by100625_with_distances.arrow')
+df.head()
+```
+
+### Logistic Regression.
+
+Load our complete data.
+
+```{python}
+# Load the data with all features
+df = pd.read_feather('data/nypd311w062925noise_by100625_with_distances.arrow')
+
+print(f"Total rows: {len(df)}")
+print(f"Columns: {df.columns.tolist()}")
+```
+Add a lot of predictors to see if they make a good model.
+
+```{python}
+# Create time-based features
+df['hour'] = df['created_date'].dt.hour
+df['day_of_week'] = df['created_date'].dt.dayofweek
+df['month'] = df['created_date'].dt.month
+df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
+df['is_night'] = ((df['hour'] >= 20) | (df['hour'] < 6)).astype(int)
+
+print(f"Sample of new features:")
+print(df[['hour', 'day_of_week', 'is_weekend', 'is_night']].head())
+```
+
+Add these feature columns into our data for analysis. And clean the missing
+data.
+
+```{python}
+# Select features for modeling
+feature_cols = ['descriptor', 'borough', 'hour', 'day_of_week', 'month', 
+                'is_weekend', 'is_night', 'dist2pp', 'median_household_income']
+
+# Create clean dataset (remove rows with missing values)
+df_model = df[feature_cols + ['over2h']].copy()
+df_model = df_model.dropna()
+```
+
+One hot encode our categorical data to allow our logistic regression to work. 
+```{python}
+# One-hot encode categorical variables
+df_encoded = pd.get_dummies(df_model, columns=['descriptor', 'borough'], drop_first=True)
+```
+
+Collect our predictors and use `over2hr` as predicted value, being sure to use
+random seed '1234' and split the data 80/20
+
+```{python}
+from sklearn.model_selection import train_test_split
+
+# Separate features and target
+X = df_encoded.drop('over2h', axis=1)
+y = df_encoded['over2h']
+
+# Split into train and test (80/20 with seed 1234)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=1234, stratify=y
+)
+```
+
+Scale our numerical fields so that they do not overpower the model. 
+
+```{python}
+from sklearn.preprocessing import StandardScaler
+
+# Scale numerical features
+scaler = StandardScaler()
+numerical_features = ['hour', 'day_of_week', 'month', 'is_weekend', 
+                      'is_night', 'dist2pp', 'median_household_income']
+
+X_train_scaled = X_train.copy()
+X_test_scaled = X_test.copy()
+
+X_train_scaled[numerical_features] = scaler.fit_transform(X_train[numerical_features])
+X_test_scaled[numerical_features] = scaler.transform(X_test[numerical_features])
+```
+
+
+Build and train the logistic regression model with balanced class weights. From
+my testing balanced was the best for my data.
+
+```{python}
+from sklearn.linear_model import LogisticRegression
+
+logit_model = LogisticRegression(
+    C=1.0,
+    max_iter=1000,
+    random_state=1234,
+    solver='lbfgs',
+    class_weight='balanced'
+)
+
+logit_model.fit(X_train_scaled, y_train)
+```
+
+We now test our data and print the results.
+```{python}
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+
+# Make predictions on test set
+y_test_pred = logit_model.predict(X_test_scaled)
+y_test_pred_proba = logit_model.predict_proba(X_test_scaled)[:, 1]
+
+# Evaluate performance
+print(classification_report(y_test, y_test_pred))
+print(f"\nROC-AUC Score: {roc_auc_score(y_test, y_test_pred_proba):.4f}")
+
+print("\nConfusion Matrix:")
+cm = confusion_matrix(y_test, y_test_pred)
+print(cm)
+```
+As you can see my model is not very strong, seeing as the best possible ROC-AUC
+is 1, my score is on the lower end, but still better than random guessing which
+would be a score of 0.5.
+
+We can also see what factors have the greatest prediction power.
+
+```{python}
+feature_importance = pd.DataFrame({
+    'feature': X_train_scaled.columns,
+    'coefficient': logit_model.coef_[0]
+})
+feature_importance['abs_coefficient'] = abs(feature_importance['coefficient'])
+feature_importance = feature_importance.sort_values('abs_coefficient', ascending=False)
+
+print(feature_importance.head(15).to_string(index=False))
+```
+### Summary in plain english
+
+From this analysis I have found that it is very difficult to predict police
+response times. The most significant feature in my model was being in Brooklyn.
+Meaning Brooklyn noise complaints get faster response times on average.
+
+Also another significant finding is that proximity to a police department does
+not mean faster response times for your noise complaints.
+
+I believe this is likely because police officers that investigate noise
+complaints are usually on patrol, meaning they are not in the police station
+when asked to investigate a call.
